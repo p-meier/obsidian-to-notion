@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass, asdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 import yaml
 
 import requests
@@ -171,6 +171,53 @@ class ObsidianToNotionMigrator:
         
         self.logger.info("Configuration validated successfully")
     
+    def _sanitize_filename(self, filename: str) -> str:
+        """Sanitize filename for Notion API upload"""
+        # URL decode the filename first
+        decoded = unquote(filename)
+        
+        # Replace problematic characters
+        sanitized = decoded.replace('=', '_').replace('$', '_').replace('?', '_')
+        sanitized = sanitized.replace('&', '_and_').replace('%', '_percent_')
+        sanitized = sanitized.replace('#', '_hash_').replace('+', '_plus_')
+        
+        # Remove or replace other special characters that might cause issues
+        sanitized = re.sub(r'[<>:"|*]', '_', sanitized)
+        
+        # Collapse multiple underscores
+        sanitized = re.sub(r'_+', '_', sanitized)
+        
+        # Remove leading/trailing underscores
+        sanitized = sanitized.strip('_')
+        
+        return sanitized
+    
+    def _normalize_code_language(self, language: str) -> str:
+        """Normalize code language to supported Notion languages"""
+        if not language:
+            return "plain text"
+        
+        # Map common aliases and unsupported languages to supported ones
+        language_map = {
+            'cardlink': 'plain text',
+            'text': 'plain text',
+            'txt': 'plain text',
+            'py': 'python',
+            'js': 'javascript',
+            'ts': 'typescript',
+            'jsx': 'javascript',
+            'tsx': 'typescript',
+            'md': 'markdown',
+            'yml': 'yaml',
+            'sh': 'shell',
+            'bash': 'shell',
+            'zsh': 'shell',
+            'fish': 'shell'
+        }
+        
+        normalized = language.lower().strip()
+        return language_map.get(normalized, normalized if normalized else "plain text")
+    
     def _scan_vault(self) -> List[MarkdownFile]:
         """Scan vault directory for Markdown files and extract metadata"""
         vault_path = Path(self.config.source_vault_path)
@@ -235,19 +282,12 @@ class ObsidianToNotionMigrator:
         )
     
     def _extract_title(self, frontmatter: Dict, content: str, file_path: Path) -> str:
-        """Extract title from frontmatter, first heading, or filename"""
-        # Priority: frontmatter title > first heading > filename
+        """Extract title from frontmatter or filename (like Obsidian)"""
+        # Priority: frontmatter title > filename (like Obsidian behavior)
         if 'title' in frontmatter:
             return str(frontmatter['title'])
         
-        # Look for first heading
-        lines = content.split('\n')
-        for line in lines:
-            line = line.strip()
-            if line.startswith('#'):
-                return line.lstrip('#').strip()
-        
-        # Fall back to filename
+        # Use filename as title (Obsidian behavior)
         return file_path.stem
     
     def _extract_file_references(self, content: str) -> List[Tuple[str, Optional[str]]]:
@@ -284,21 +324,30 @@ class ObsidianToNotionMigrator:
         """Resolve file path relative to markdown file or vault root"""
         vault_root = Path(self.config.source_vault_path)
         
+        # Try both original filename and URL-decoded version
+        filenames_to_try = [filename]
+        if '%' in filename:
+            decoded_filename = unquote(filename)
+            if decoded_filename != filename:
+                filenames_to_try.append(decoded_filename)
+        
         # Common search locations
-        search_paths = [
-            # Same directory as markdown file
-            markdown_file_path.parent / filename,
-            # Attachments folder relative to markdown file
-            markdown_file_path.parent / self.config.attachments_folder / filename,
-            # Vault root
-            vault_root / filename,
-            # Attachments folder in vault root
-            vault_root / self.config.attachments_folder / filename,
-            # Common asset folders
-            vault_root / "assets" / filename,
-            vault_root / "files" / filename,
-            vault_root / "media" / filename,
-        ]
+        search_paths = []
+        for fname in filenames_to_try:
+            search_paths.extend([
+                # Same directory as markdown file
+                markdown_file_path.parent / fname,
+                # Attachments folder relative to markdown file
+                markdown_file_path.parent / self.config.attachments_folder / fname,
+                # Vault root
+                vault_root / fname,
+                # Attachments folder in vault root
+                vault_root / self.config.attachments_folder / fname,
+                # Common asset folders
+                vault_root / "assets" / fname,
+                vault_root / "files" / fname,
+                vault_root / "media" / fname,
+            ])
         
         # Search for file with various extensions if no extension provided
         if not Path(filename).suffix:
@@ -315,9 +364,10 @@ class ObsidianToNotionMigrator:
                 return path
         
         # Recursive search as fallback
-        for path in vault_root.rglob(filename):
-            if path.is_file():
-                return path
+        for fname in filenames_to_try:
+            for path in vault_root.rglob(fname):
+                if path.is_file():
+                    return path
         
         return None
     
@@ -390,6 +440,10 @@ class ObsidianToNotionMigrator:
             
             self.logger.info(f"Uploading file: {file_info.name} ({file_info.size} bytes)")
             
+            # Sanitize filename for Notion API
+            sanitized_filename = self._sanitize_filename(file_info.name)
+            self.logger.debug(f"Sanitized filename: {file_info.name} -> {sanitized_filename}")
+            
             # Step 1: Create file upload object
             create_response = self.session.post(
                 "https://api.notion.com/v1/file_uploads",
@@ -399,7 +453,7 @@ class ObsidianToNotionMigrator:
                     "Content-Type": "application/json"
                 },
                 json={
-                    "filename": file_info.name,
+                    "filename": sanitized_filename,
                     "file_size": file_info.size
                 },
                 timeout=30
@@ -419,7 +473,7 @@ class ObsidianToNotionMigrator:
                         # Content-Type will be set automatically for multipart/form-data
                     },
                     files={
-                        'file': (file_info.name, f, file_info.mime_type)
+                        'file': (sanitized_filename, f, file_info.mime_type)
                     },
                     timeout=60
                 )
@@ -563,7 +617,7 @@ class ObsidianToNotionMigrator:
                         "text": {"content": code_content}
                     }
                 ],
-                "language": language if language else "text"
+                "language": self._normalize_code_language(language)
             }
         }, lines_consumed
     
