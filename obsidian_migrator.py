@@ -218,6 +218,41 @@ class ObsidianToNotionMigrator:
         normalized = language.lower().strip()
         return language_map.get(normalized, normalized if normalized else "plain text")
     
+    def _parse_list_item_content(self, text: str, asset_mapping: Dict[str, str]) -> Dict:
+        """Parse list item content that may contain both text and embeds"""
+        # Check if the text contains embeds
+        if '![[' in text:
+            # For mixed content, extract the text part and use it as rich_text
+            # Then add the embedded files as children
+            text_only = re.sub(r'!\[\[[^\]]+\]\]', '', text).strip()
+            rich_text = self._parse_rich_text(text_only) if text_only else []
+            
+            # Create children for embedded files
+            children = []
+            embeds = re.findall(r'!\[\[([^|\]]+)(\|([^\]]+))?\]\]', text)
+            
+            for embed in embeds:
+                filename = embed[0].strip()
+                display_name = embed[2] if embed[2] else None
+                
+                # Check if filename is in asset_mapping directly
+                if filename in asset_mapping:
+                    upload_id = asset_mapping[filename]
+                    file_block = self._create_file_block(filename, upload_id, display_name)
+                    children.append(file_block)
+                else:
+                    # Create placeholder for missing files
+                    missing_block = self._create_missing_file_block(filename)
+                    children.append(missing_block)
+            
+            result = {"rich_text": rich_text}
+            if children:
+                result["children"] = children
+            return result
+        else:
+            # No embeds, just rich text
+            return {"rich_text": self._parse_rich_text(text)}
+    
     def _scan_vault(self) -> List[MarkdownFile]:
         """Scan vault directory for Markdown files and extract metadata"""
         vault_path = Path(self.config.source_vault_path)
@@ -568,7 +603,7 @@ class ObsidianToNotionMigrator:
             
             # Handle lists
             if line.startswith('- ') or line.startswith('* ') or re.match(r'^\d+\.', line):
-                list_blocks, lines_consumed = self._parse_list(lines[i:])
+                list_blocks, lines_consumed = self._parse_list(lines[i:], asset_mapping)
                 blocks.extend(list_blocks)
                 i += lines_consumed
                 continue
@@ -621,7 +656,7 @@ class ObsidianToNotionMigrator:
             }
         }, lines_consumed
     
-    def _parse_list(self, lines: List[str]) -> Tuple[List[Dict], int]:
+    def _parse_list(self, lines: List[str], asset_mapping: Dict[str, str]) -> Tuple[List[Dict], int]:
         """Parse a list and return list item blocks with proper nesting and number of lines consumed"""
         list_blocks = []
         lines_consumed = 0
@@ -644,12 +679,12 @@ class ObsidianToNotionMigrator:
                 list_item = {
                     "type": "bulleted_list_item",
                     "bulleted_list_item": {
-                        "rich_text": self._parse_rich_text(list_item_text)
+                        **self._parse_list_item_content(list_item_text, asset_mapping)
                     }
                 }
                 
                 # Look ahead for nested items
-                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level)
+                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level, asset_mapping)
                 if children:
                     list_item["bulleted_list_item"]["children"] = children
                 
@@ -664,12 +699,12 @@ class ObsidianToNotionMigrator:
                 list_item = {
                     "type": "numbered_list_item",
                     "numbered_list_item": {
-                        "rich_text": self._parse_rich_text(list_item_text)
+                        **self._parse_list_item_content(list_item_text, asset_mapping)
                     }
                 }
                 
                 # Look ahead for nested items
-                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level)
+                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level, asset_mapping)
                 if children:
                     list_item["numbered_list_item"]["children"] = children
                 
@@ -681,7 +716,7 @@ class ObsidianToNotionMigrator:
         
         return list_blocks, lines_consumed
     
-    def _parse_nested_list_items(self, lines: List[str], parent_indent: int) -> Tuple[List[Dict], int]:
+    def _parse_nested_list_items(self, lines: List[str], parent_indent: int, asset_mapping: Dict[str, str]) -> Tuple[List[Dict], int]:
         """Parse nested list items that are indented more than the parent"""
         nested_blocks = []
         lines_consumed = 0
@@ -709,12 +744,12 @@ class ObsidianToNotionMigrator:
                 list_item = {
                     "type": "bulleted_list_item",
                     "bulleted_list_item": {
-                        "rich_text": self._parse_rich_text(list_item_text)
+                        **self._parse_list_item_content(list_item_text, asset_mapping)
                     }
                 }
                 
                 # Look for further nested items
-                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level)
+                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level, asset_mapping)
                 if children:
                     list_item["bulleted_list_item"]["children"] = children
                 
@@ -729,12 +764,12 @@ class ObsidianToNotionMigrator:
                 list_item = {
                     "type": "numbered_list_item",
                     "numbered_list_item": {
-                        "rich_text": self._parse_rich_text(list_item_text)
+                        **self._parse_list_item_content(list_item_text, asset_mapping)
                     }
                 }
                 
                 # Look for further nested items
-                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level)
+                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level, asset_mapping)
                 if children:
                     list_item["numbered_list_item"]["children"] = children
                 
