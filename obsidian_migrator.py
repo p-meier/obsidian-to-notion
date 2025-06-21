@@ -63,6 +63,10 @@ class MigrationConfig:
         if self.database_properties is None:
             self.database_properties = DEFAULT_CONFIG['default_database_properties']
 
+        # Resolve source vault path to be absolute
+        if self.source_vault_path:
+            self.source_vault_path = str(Path(self.source_vault_path).expanduser().resolve())
+
 @dataclass 
 class FileInfo:
     """Information about a file to be uploaded"""
@@ -269,14 +273,18 @@ class ObsidianToNotionMigrator:
         if not scan_path.exists():
             raise ValueError(f"Scan path does not exist: {scan_path}")
         
-        # Find all .md files recursively
-        for md_file in scan_path.rglob("*.md"):
-            if md_file.is_file():
+        # Find all .md files recursively, case-insensitively
+        self.logger.info("Starting recursive file scan...")
+        all_files = list(scan_path.rglob("*"))
+        self.logger.info(f"Total items found in scan path: {len(all_files)}")
+
+        for item_path in all_files:
+            if item_path.is_file() and item_path.suffix.lower() == '.md':
                 try:
-                    markdown_data = self._parse_markdown_file(md_file)
+                    markdown_data = self._parse_markdown_file(item_path)
                     markdown_files.append(markdown_data)
                 except Exception as e:
-                    self.logger.error(f"Error parsing {md_file}: {e}")
+                    self.logger.error(f"Error parsing {item_path}: {e}")
         
         self.logger.info(f"Found {len(markdown_files)} Markdown files")
         return markdown_files
