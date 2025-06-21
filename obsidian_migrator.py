@@ -28,7 +28,7 @@ from tqdm import tqdm
 DEFAULT_CONFIG = {
     'batch_size': 10,
     'max_workers': 3,
-    'max_file_size': 20 * 1024 * 1024,  # 20MB
+    'max_file_size': 100 * 1024 * 1024,  # 100MB
     'supported_extensions': ['.png', '.jpg', '.jpeg', '.gif', '.pdf', '.mp4', '.mov', '.mp3', '.wav', '.doc', '.docx'],
     'rate_limit_delay': 0.34,  # Notion allows 3 requests per second
     'retry_attempts': 5,
@@ -50,7 +50,7 @@ class MigrationConfig:
     attachments_folder: str = "attachments"
     batch_size: int = 10
     max_workers: int = 3
-    max_file_size: int = 20 * 1024 * 1024
+    max_file_size: int = 100 * 1024 * 1024
     supported_extensions: List[str] = None
     dry_run: bool = False
     database_properties: Dict[str, Dict] = None
@@ -437,9 +437,11 @@ class ObsidianToNotionMigrator:
     
     def _validate_file_for_upload(self, file_info: FileInfo) -> Tuple[bool, Optional[str]]:
         """Validate if file can be uploaded to Notion"""
-        # Check file size
-        if file_info.size > self.config.max_file_size:
-            return False, f"File too large: {file_info.size} bytes (max: {self.config.max_file_size})"
+        # Check file size against Notion's 100MB limit
+        max_size = 100 * 1024 * 1024  # 100MB
+        if file_info.size > max_size:
+            size_mb = file_info.size / (1024 * 1024)
+            return False, f"File too large: {size_mb:.1f}MB (max: 100MB)"
         
         # Check file extension
         file_ext = file_info.path.suffix.lower()
@@ -453,7 +455,7 @@ class ObsidianToNotionMigrator:
         return True, None
     
     def _upload_file_to_notion(self, file_info: FileInfo) -> UploadResult:
-        """Upload a file to Notion using the correct API (2022-06-28)"""
+        """Upload a file to Notion using standard or multipart upload based on file size"""
         try:
             # Check if already uploaded (deduplication)
             if file_info.hash in self.uploaded_files:
@@ -475,57 +477,11 @@ class ObsidianToNotionMigrator:
             
             self.logger.info(f"Uploading file: {file_info.name} ({file_info.size} bytes)")
             
-            # Sanitize filename for Notion API
-            sanitized_filename = self._sanitize_filename(file_info.name)
-            self.logger.debug(f"Sanitized filename: {file_info.name} -> {sanitized_filename}")
-            
-            # Step 1: Create file upload object
-            create_response = self.session.post(
-                "https://api.notion.com/v1/file_uploads",
-                headers={
-                    "Authorization": f"Bearer {self.config.notion_token}",
-                    "Notion-Version": "2022-06-28",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "filename": sanitized_filename,
-                    "file_size": file_info.size
-                },
-                timeout=30
-            )
-            create_response.raise_for_status()
-            upload_data = create_response.json()
-            
-            file_upload_id = upload_data["id"]
-            
-            # Step 2: Send file content to the upload endpoint
-            with open(file_info.path, 'rb') as f:
-                send_response = self.session.post(
-                    f"https://api.notion.com/v1/file_uploads/{file_upload_id}/send",
-                    headers={
-                        "Authorization": f"Bearer {self.config.notion_token}",
-                        "Notion-Version": "2022-06-28"
-                        # Content-Type will be set automatically for multipart/form-data
-                    },
-                    files={
-                        'file': (sanitized_filename, f, file_info.mime_type)
-                    },
-                    timeout=60
-                )
-                send_response.raise_for_status()
-            
-            # Cache successful upload
-            self.uploaded_files[file_info.hash] = file_upload_id
-            self.logger.info(f"Successfully uploaded: {file_info.name} -> {file_upload_id}")
-            
-            # Rate limiting
-            time.sleep(DEFAULT_CONFIG['rate_limit_delay'])
-            
-            return UploadResult(
-                success=True,
-                upload_id=file_upload_id,
-                file_path=str(file_info.path)
-            )
+            # Use multipart upload for files >20MB
+            if file_info.size > 20 * 1024 * 1024:
+                return self._upload_file_multipart(file_info)
+            else:
+                return self._upload_file_standard(file_info)
             
         except Exception as e:
             error_msg = f"Failed to upload {file_info.name}: {str(e)}"
@@ -537,6 +493,167 @@ class ObsidianToNotionMigrator:
                 error_message=error_msg,
                 file_path=str(file_info.path)
             )
+    
+    def _upload_file_standard(self, file_info: FileInfo) -> UploadResult:
+        """Upload a file ≤20MB using standard single-request upload"""
+        sanitized_filename = self._sanitize_filename(file_info.name)
+        self.logger.debug(f"Sanitized filename: {file_info.name} -> {sanitized_filename}")
+        
+        # Step 1: Create file upload object
+        create_response = self.session.post(
+            "https://api.notion.com/v1/file_uploads",
+            headers={
+                "Authorization": f"Bearer {self.config.notion_token}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json"
+            },
+            json={
+                "filename": sanitized_filename,
+                "file_size": file_info.size
+            },
+            timeout=30
+        )
+        create_response.raise_for_status()
+        upload_data = create_response.json()
+        
+        file_upload_id = upload_data["id"]
+        
+        # Step 2: Send file content
+        with open(file_info.path, 'rb') as f:
+            send_response = self.session.post(
+                f"https://api.notion.com/v1/file_uploads/{file_upload_id}/send",
+                headers={
+                    "Authorization": f"Bearer {self.config.notion_token}",
+                    "Notion-Version": "2022-06-28"
+                },
+                files={
+                    'file': (sanitized_filename, f, file_info.mime_type)
+                },
+                timeout=60
+            )
+            send_response.raise_for_status()
+        
+        # Cache successful upload
+        self.uploaded_files[file_info.hash] = file_upload_id
+        self.logger.info(f"Successfully uploaded: {file_info.name} -> {file_upload_id}")
+        
+        # Rate limiting
+        time.sleep(DEFAULT_CONFIG['rate_limit_delay'])
+        
+        return UploadResult(
+            success=True,
+            upload_id=file_upload_id,
+            file_path=str(file_info.path)
+        )
+    
+    def _upload_file_multipart(self, file_info: FileInfo) -> UploadResult:
+        """Upload a file >20MB using multipart upload with part_number"""
+        sanitized_filename = self._sanitize_filename(file_info.name)
+        self.logger.info(f"Using multipart upload for large file: {file_info.name}")
+        
+        # Calculate number of parts needed
+        chunk_size = 20 * 1024 * 1024  # 20MB chunks
+        number_of_parts = (file_info.size + chunk_size - 1) // chunk_size  # Ceiling division
+        self.logger.debug(f"File will be split into {number_of_parts} parts")
+        
+        # Step 1: Create file upload object with multipart mode
+        try:
+            create_response = self.session.post(
+                "https://api.notion.com/v1/file_uploads",
+                headers={
+                    "Authorization": f"Bearer {self.config.notion_token}",
+                    "Notion-Version": "2022-06-28",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "filename": sanitized_filename,
+                    "file_size": file_info.size,
+                    "mode": "multi_part",
+                    "number_of_parts": number_of_parts
+                },
+                timeout=30
+            )
+            self.logger.debug(f"Create upload response: {create_response.status_code}, {create_response.text}")
+            create_response.raise_for_status()
+        except Exception as e:
+            self.logger.error(f"Failed to create multipart upload: {e}")
+            if hasattr(create_response, 'text'):
+                self.logger.error(f"Response body: {create_response.text}")
+            raise
+        upload_data = create_response.json()
+        
+        file_upload_id = upload_data["id"]
+        
+        # Step 2: Upload file in parts (max 20MB per part)
+        part_number = 1
+        
+        with open(file_info.path, 'rb') as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                
+                self.logger.debug(f"Uploading part {part_number} for {file_info.name}")
+                
+                # Send each part with part_number
+                try:
+                    part_response = self.session.post(
+                        f"https://api.notion.com/v1/file_uploads/{file_upload_id}/send",
+                        headers={
+                            "Authorization": f"Bearer {self.config.notion_token}",
+                            "Notion-Version": "2022-06-28"
+                        },
+                        files={
+                            'file': (sanitized_filename, chunk, file_info.mime_type)
+                        },
+                        data={
+                            'part_number': str(part_number)
+                        },
+                        timeout=120
+                    )
+                    self.logger.debug(f"Part {part_number} response: {part_response.status_code}, {part_response.text}")
+                    part_response.raise_for_status()
+                except Exception as e:
+                    self.logger.error(f"Failed to upload part {part_number}: {e}")
+                    if hasattr(part_response, 'text'):
+                        self.logger.error(f"Part {part_number} response body: {part_response.text}")
+                    raise
+                
+                part_number += 1
+                
+                # Rate limiting between parts
+                time.sleep(DEFAULT_CONFIG['rate_limit_delay'])
+        
+        # Step 3: Complete the multipart upload
+        self.logger.debug(f"Completing multipart upload for {file_info.name}")
+        try:
+            complete_response = self.session.post(
+                f"https://api.notion.com/v1/file_uploads/{file_upload_id}/complete",
+                headers={
+                    "Authorization": f"Bearer {self.config.notion_token}",
+                    "Notion-Version": "2022-06-28",
+                    "Content-Type": "application/json"
+                },
+                json={},
+                timeout=30
+            )
+            self.logger.debug(f"Complete response: {complete_response.status_code}, {complete_response.text}")
+            complete_response.raise_for_status()
+        except Exception as e:
+            self.logger.error(f"Failed to complete multipart upload: {e}")
+            if hasattr(complete_response, 'text'):
+                self.logger.error(f"Complete response body: {complete_response.text}")
+            raise
+        
+        # Cache successful upload
+        self.uploaded_files[file_info.hash] = file_upload_id
+        self.logger.info(f"Successfully uploaded (multipart): {file_info.name} -> {file_upload_id}")
+        
+        return UploadResult(
+            success=True,
+            upload_id=file_upload_id,
+            file_path=str(file_info.path)
+        )
     
     def _batch_upload_files(self, file_infos: List[FileInfo]) -> Dict[str, str]:
         """Upload multiple files concurrently with progress tracking"""
