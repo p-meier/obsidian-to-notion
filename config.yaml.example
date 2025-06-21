@@ -1,0 +1,52 @@
+# Obsidian to Notion Migration Configuration
+# Copy this file to config.yaml and update with your actual values
+
+# Required Configuration
+notion_token: "ntn_your_token_here"
+target_database_id: "your_database_id_here"
+source_vault_path: "/path/to/your/obsidian/vault"
+
+# Optional Configuration
+attachments_folder: "_assets"
+batch_size: 5
+max_workers: 1
+max_file_size: 20971520  # 20MB in bytes
+dry_run: false
+extract_frontmatter: true
+
+# Optional: Target specific subfolder instead of entire vault
+# target_subfolder: "2 Areas/Work Notes"
+
+# Supported file extensions for upload
+supported_extensions:
+  - .png
+  - .jpg
+  - .jpeg
+  - .gif
+  - .pdf
+  - .mp4
+  - .mov
+  - .mp3
+  - .wav
+  - .doc
+  - .docx
+
+# Database property configuration
+# These define how frontmatter fields are mapped to Notion database properties
+database_properties:
+  Name:
+    type: title
+  Tags:
+    type: multi_select
+  Created:
+    type: created_time
+  Modified:
+    type: last_edited_time
+  Source File:
+    type: rich_text
+
+# Notes:
+# - Get your Notion token from https://www.notion.so/my-integrations
+# - Database ID is found in your Notion database URL
+# - Make sure your integration has access to the target database
+# - Supported file types are limited by Notion's file upload restrictions
