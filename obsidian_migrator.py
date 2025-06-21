@@ -568,49 +568,130 @@ class ObsidianToNotionMigrator:
         }, lines_consumed
     
     def _parse_list(self, lines: List[str]) -> Tuple[List[Dict], int]:
-        """Parse a list and return list item blocks and number of lines consumed"""
+        """Parse a list and return list item blocks with proper nesting and number of lines consumed"""
         list_blocks = []
         lines_consumed = 0
+        i = 0
         
-        for i, line in enumerate(lines):
-            line = line.strip()
-            if not line:
+        while i < len(lines):
+            line = lines[i]
+            if not line.strip():
                 break
             
+            # Calculate indentation level
+            indent_level = len(line) - len(line.lstrip())
+            line_content = line.strip()
+            
             # Check if it's a list item
-            if line.startswith('- ') or line.startswith('* '):
-                list_item_text = line[2:].strip()
-                list_blocks.append({
+            if line_content.startswith('- ') or line_content.startswith('* '):
+                list_item_text = line_content[2:].strip()
+                
+                # Create the list item block
+                list_item = {
                     "type": "bulleted_list_item",
                     "bulleted_list_item": {
-                        "rich_text": [
-                            {
-                                "type": "text",
-                                "text": {"content": list_item_text}
-                            }
-                        ]
+                        "rich_text": self._parse_rich_text(list_item_text)
                     }
-                })
-                lines_consumed = i + 1
-            elif re.match(r'^\d+\.', line):
+                }
+                
+                # Look ahead for nested items
+                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level)
+                if children:
+                    list_item["bulleted_list_item"]["children"] = children
+                
+                list_blocks.append(list_item)
+                lines_consumed = i + 1 + child_lines
+                i += 1 + child_lines
+                
+            elif re.match(r'^\d+\.', line_content):
                 # Numbered list
-                list_item_text = re.sub(r'^\d+\.\s*', '', line)
-                list_blocks.append({
+                list_item_text = re.sub(r'^\d+\.\s*', '', line_content)
+                
+                list_item = {
                     "type": "numbered_list_item",
                     "numbered_list_item": {
-                        "rich_text": [
-                            {
-                                "type": "text",
-                                "text": {"content": list_item_text}
-                            }
-                        ]
+                        "rich_text": self._parse_rich_text(list_item_text)
                     }
-                })
-                lines_consumed = i + 1
+                }
+                
+                # Look ahead for nested items
+                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level)
+                if children:
+                    list_item["numbered_list_item"]["children"] = children
+                
+                list_blocks.append(list_item)
+                lines_consumed = i + 1 + child_lines
+                i += 1 + child_lines
             else:
                 break
         
         return list_blocks, lines_consumed
+    
+    def _parse_nested_list_items(self, lines: List[str], parent_indent: int) -> Tuple[List[Dict], int]:
+        """Parse nested list items that are indented more than the parent"""
+        nested_blocks = []
+        lines_consumed = 0
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i]
+            if not line.strip():
+                i += 1
+                lines_consumed += 1
+                continue
+            
+            # Calculate indentation level
+            indent_level = len(line) - len(line.lstrip())
+            line_content = line.strip()
+            
+            # If indentation is less than or equal to parent, we're done with nested items
+            if indent_level <= parent_indent:
+                break
+            
+            # Check if it's a list item with more indentation than parent
+            if line_content.startswith('- ') or line_content.startswith('* '):
+                list_item_text = line_content[2:].strip()
+                
+                list_item = {
+                    "type": "bulleted_list_item",
+                    "bulleted_list_item": {
+                        "rich_text": self._parse_rich_text(list_item_text)
+                    }
+                }
+                
+                # Look for further nested items
+                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level)
+                if children:
+                    list_item["bulleted_list_item"]["children"] = children
+                
+                nested_blocks.append(list_item)
+                lines_consumed = i + 1 + child_lines
+                i += 1 + child_lines
+                
+            elif re.match(r'^\d+\.', line_content):
+                # Numbered nested list
+                list_item_text = re.sub(r'^\d+\.\s*', '', line_content)
+                
+                list_item = {
+                    "type": "numbered_list_item",
+                    "numbered_list_item": {
+                        "rich_text": self._parse_rich_text(list_item_text)
+                    }
+                }
+                
+                # Look for further nested items
+                children, child_lines = self._parse_nested_list_items(lines[i+1:], indent_level)
+                if children:
+                    list_item["numbered_list_item"]["children"] = children
+                
+                nested_blocks.append(list_item)
+                lines_consumed = i + 1 + child_lines
+                i += 1 + child_lines
+            else:
+                # Not a list item, stop parsing nested items
+                break
+        
+        return nested_blocks, lines_consumed
     
     def _process_embeds_in_line(self, line: str, asset_mapping: Dict[str, str]) -> List[Dict]:
         """Process embedded files in a line and create appropriate blocks"""
