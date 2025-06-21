@@ -561,7 +561,16 @@ class ObsidianToNotionMigrator:
                     try:
                         result = future.result()
                         if result.success:
+                            # Add filename key for standard lookups
                             upload_mapping[file_info.name] = result.upload_id
+                            
+                            # Also add relative path key for full path lookups from markdown
+                            vault_root = Path(self.config.source_vault_path)
+                            try:
+                                relative_path = file_info.path.relative_to(vault_root)
+                                upload_mapping[str(relative_path)] = result.upload_id
+                            except ValueError:
+                                pass  # Skip if not relative to vault root
                         else:
                             self.logger.error(f"Upload failed: {result.error_message}")
                     except Exception as e:
@@ -1159,8 +1168,17 @@ class ObsidianToNotionMigrator:
                 self.logger.info("Phase 3: Uploading assets...")
                 asset_mapping = self._batch_upload_files(all_assets)
             else:
-                # Create dummy mapping for dry run
-                asset_mapping = {asset.name: f"dry-run-upload-{i}" for i, asset in enumerate(all_assets)}
+                # Create dummy mapping for dry run with both filename and path keys
+                asset_mapping = {}
+                vault_root = Path(self.config.source_vault_path)
+                for i, asset in enumerate(all_assets):
+                    upload_id = f"dry-run-upload-{i}"
+                    asset_mapping[asset.name] = upload_id  # filename key
+                    try:
+                        relative_path = asset.path.relative_to(vault_root)
+                        asset_mapping[str(relative_path)] = upload_id  # path key
+                    except ValueError:
+                        pass  # Skip if not relative to vault root
             
             # Phase 4: Migrate pages to database
             self.logger.info("Phase 4: Creating database entries...")
@@ -1227,7 +1245,9 @@ class ObsidianToNotionMigrator:
         duration = end_time - start_time
         
         total_assets = len(all_assets)
-        successful_uploads = len([upload_id for upload_id in asset_mapping.values() if upload_id])
+        # Count unique upload IDs since asset_mapping has duplicate entries (filename + path)
+        unique_upload_ids = set(upload_id for upload_id in asset_mapping.values() if upload_id)
+        successful_uploads = len(unique_upload_ids)
         failed_uploads = total_assets - successful_uploads
         
         successful_pages = len(migrated_pages)
